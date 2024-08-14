@@ -5,11 +5,13 @@ __license__ = "GPL"
 __version__ = "2.3.0-b"
 
 from os import path
+import shutil
+import tempfile
+import numpy as np
 import pandas as pd
 from math import ceil
 from joblib import Parallel, delayed
-from picrust2.util import system_call_check, TemporaryDirectory
-
+from picrust2.util import system_call_check, TemporaryDirectory, call
 
 def castor_hsp_workflow(tree_path,
                         trait_table_path,
@@ -20,6 +22,7 @@ def castor_hsp_workflow(tree_path,
                         check_input=False,
                         num_proc=1,
                         ran_seed=None,
+                        output=None,
                         verbose=False):
     '''Runs full HSP workflow. Main purpose is to read in trait table and run
     HSP on subsets of column at a time to be more memory efficient. Will return
@@ -54,7 +57,7 @@ def castor_hsp_workflow(tree_path,
 
             file_subsets.append(subset_file)
 
-        castor_out_raw = Parallel(n_jobs=num_proc)(delayed(
+        castor_out_raw = Parallel(n_jobs=num_proc, backend="threading")(delayed(
                                     castor_hsp_wrapper)(tree_path,
                                                         trait_in,
                                                         hsp_method,
@@ -64,28 +67,56 @@ def castor_hsp_workflow(tree_path,
                                                         verbose)
                                     for trait_in in file_subsets)
 
-    # Get lists of predictions and CIs for all chunks.
-    predict_out_chunks = []
-    ci_out_chunks = []
-
+    file_list = []
+    file_obj = []
     for i in range(len(castor_out_raw)):
-        predict_out_chunks.append(castor_out_raw[i][0])
-        ci_out_chunks.append(castor_out_raw[i][1])
+        file_list.append(path.join(castor_out_raw[i][0].name, "predicted_counts.txt"))
+        file_obj.append(castor_out_raw[i][0])
 
-    predict_out_combined = pd.concat(predict_out_chunks, axis=1, sort=True)
-
+    concat = path.join(path.dirname(path.abspath(__file__)),
+                                  'concat')
     # Add NSTI as column as well if option specified.
     if calc_nsti:
-        predict_out_combined = pd.concat([predict_out_combined, nsti_values],
-                                         axis=1, sort=True)
+        temp_obj = temporaryDirectory()
+        temp_dir = temp_obj.name
+        nsti_file = path.join(temp_dir, "nsti_values.txt")
+        nsti_values.to_csv(path_or_buf=nsti_file, sep="\t", compression="infer")
+        file_list.append(nsti_file)
+        file_obj.append(temp_obj)
+    concat_cmd = " ".join([concat,
+                    ",".join(file_list),
+                    output])
+
+    # Run concat
+    system_call_check(concat_cmd, print_command=verbose,
+                        print_stdout=verbose, print_stderr=verbose)
+
+    for i in file_obj:
+        i.cleanup()
 
     ci_out_combined = None
 
-    if calc_ci:
-        ci_out_combined = pd.concat(ci_out_chunks, axis=1, sort=True)
+    # if calc_ci:
+    #     ci_out_combined = pd.concat(ci_out_chunks, axis=1, sort=True)
 
-    return(predict_out_combined, ci_out_combined)
+    return("", ci_out_combined)
 
+class temporaryDirectory(object):
+    def __init__(self, suffix=None, prefix=None, dir=None):
+        self.name = tempfile.mkdtemp(suffix, prefix, dir)
+
+    def __repr__(self):
+        return "<{} {!r}>".format(self.__class__.__name__, self.name)
+
+    def __enter__(self):
+        return self.name
+
+    def cleanup(self):
+        # Line added by Gavin Douglas to change permissions to 777 before
+        # deleting:
+        call(["chmod", "-R", "777", self.name])
+
+        shutil.rmtree(self.name)
 
 def castor_hsp_wrapper(tree_path, trait_tab, hsp_method, calc_ci=False,
                        check_input=False, ran_seed=None, verbose=False):
@@ -106,44 +137,36 @@ def castor_hsp_wrapper(tree_path, trait_tab, hsp_method, calc_ci=False,
         check_input_setting = "FALSE"
 
     # Create temporary directory for writing output files of castor_hsp.R
-    with TemporaryDirectory() as temp_dir:
+    temp_obj = temporaryDirectory()
+    temp_dir = temp_obj.name
 
-        output_count_path = path.join(temp_dir, "predicted_counts.txt")
-        output_ci_path = path.join(temp_dir, "predicted_ci.txt")
+    output_count_path = path.join(temp_dir, "predicted_counts.txt")
+    output_ci_path = path.join(temp_dir, "predicted_ci.txt")
 
-        hsp_cmd = " ".join(["Rscript",
-                            castor_hsp_script,
-                            tree_path,
-                            trait_tab,
-                            hsp_method,
-                            calc_ci_setting,
-                            check_input_setting,
-                            output_count_path,
-                            output_ci_path,
-                            str(ran_seed)])
+    hsp_cmd = " ".join(["Rscript",
+                        castor_hsp_script,
+                        tree_path,
+                        trait_tab,
+                        hsp_method,
+                        calc_ci_setting,
+                        check_input_setting,
+                        output_count_path,
+                        output_ci_path,
+                        str(ran_seed)])
 
-        # Run castor_hsp.R
-        system_call_check(hsp_cmd, print_command=verbose,
-                          print_stdout=verbose, print_stderr=verbose)
+    # Run castor_hsp.R
+    system_call_check(hsp_cmd, print_command=verbose,
+                        print_stdout=verbose, print_stderr=verbose)
 
-        # Load the output into Table objects
-        try:
-            asr_table = pd.read_csv(filepath_or_buffer=output_count_path,
+    if calc_ci:
+        asr_ci_table = pd.read_csv(filepath_or_buffer=output_ci_path,
                                     sep="\t", dtype={'sequence': str})
-            asr_table.set_index('sequence', drop=True, inplace=True)
-        except IOError:
-            raise ValueError("Cannot read in expected output file" +
-                            output_ci_path)
-
-        if calc_ci:
-            asr_ci_table = pd.read_csv(filepath_or_buffer=output_ci_path,
-                                       sep="\t", dtype={'sequence': str})
-            asr_ci_table.set_index('sequence', drop=True, inplace=True)
-        else:
-            asr_ci_table = None
+        asr_ci_table.set_index('sequence', drop=True, inplace=True)
+    else:
+        asr_ci_table = None
 
     # Return list with predicted counts and CIs.
-    return [asr_table, asr_ci_table]
+    return [temp_obj, asr_ci_table]
 
 
 def castor_nsti(tree_path,

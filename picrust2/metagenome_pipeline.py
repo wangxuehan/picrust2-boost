@@ -163,29 +163,21 @@ def strat_funcs_by_samples(func_abun, sample_abun, rare_seqs=[],
 
 
 def unstrat_funcs_only_by_samples(func_abun, sample_abun):
-    '''Take in function table and study sequence abundance table. Returns
-    unstratified table of function abundances by samples.'''
+    """Take in function table and study sequence abundance table. Returns
+    unstratified table of function abundances by samples."""
 
     # Sample ids are taken from sequence abundance table.
     sample_ids = sample_abun.columns.values
-
-    # List that will contain a series for each sample's unstratified
-    # function abundnaces.
-    sample_funcs = []
-
-    for sample in sample_ids:
-        sample_funcs.append(func_abun.mul(sample_abun[sample], axis=0).sum(axis=0))
-
-    # Build dataframe from these series.
-    unstrat_func = pd.concat(sample_funcs, axis=1, sort=True)
-
+    func_abun_np = func_abun.to_numpy()
+    sample_abun_np = sample_abun.to_numpy()
+    sample_funcs = [np.sum(func_abun_np * sample_abun_np[:,idx, None], axis=0) for idx, _ in enumerate(sample_ids)]
+    unstrat_func = np.stack(sample_funcs).T
+    unstrat_func = pd.DataFrame(unstrat_func, columns=sample_ids)
+    unstrat_func.index.name = "function"
+    unstrat_func.index = func_abun.columns
     unstrat_func = unstrat_func.loc[~(unstrat_func == 0).all(axis=1)]
 
-    unstrat_func.columns = sample_ids
-
-    unstrat_func.index.name = 'function'
-
-    return(unstrat_func)
+    return unstrat_func
 
 
 def drop_tips_by_nsti(tab, nsti_col, max_nsti):

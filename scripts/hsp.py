@@ -124,13 +124,8 @@ def main():
                                               check_input=args.check,
                                               num_proc=args.processes,
                                               ran_seed=args.seed,
+                                              output=args.output,
                                               verbose=args.verbose)
-
-    # Output the table to file.
-    make_output_dir_for_file(args.output)
-    hsp_table.to_csv(path_or_buf=args.output, index_label="sequence",
-                     sep="\t", compression="infer")
-
 
 if __name__ == "__main__":
     main()
